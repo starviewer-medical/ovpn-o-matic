@@ -1,0 +1,726 @@
+#!/bin/bash
+
+# System dependencies
+# ===================
+# *Debian*
+# apt-get install openvpn easy-rsa
+
+OOM_OVPN_DIR="/etc/openvpn"
+OOM_OVPN_CMD="openvpn"
+OOM_ERSA_DIR="$OOM_OVPN_DIR/easyrsa"
+OOM_ERSA_CMD="$OOM_ERSA_DIR/easyrsa"
+OOM_TPLS_DIR="$OOM_OVPN_DIR/templates"
+OOM_TMP_DIR=""
+
+
+function logo() {
+    echo -e "\e[38;5;231m\e[48;5;245m ⋐ \e[38;5;214movpn\e[38;5;231m-o-\e[38;5;213mmatic \e[38;5;231m⋑ \e[0m"
+}
+
+function logline() {
+    MSG=${1:-""}
+    TYPE=${2:-0}
+    # 0 = No prefix
+    # 1 = [  OK  ]
+    # 2 = [ WARN ]
+    # 3 = [ FAIL ]
+    # 4 = [ INFO ]
+    
+    case $TYPE in
+        1)
+            >&2 echo -ne "⋐ \e[01;32m OK \e[0m ⋑ "
+        ;;
+        2)
+            >&2 echo -ne "⋐ \e[01;33mWARN\e[0m ⋑ "
+        ;;
+        3)
+            >&2 echo -ne "⋐ \e[01;31mFAIL\e[0m ⋑ "
+        ;;
+        4)
+            >&2 echo -ne "⋐ \e[01;34mINFO\e[0m ⋑ "
+        ;;
+    esac
+    >&2 echo "$MSG"
+    return 0
+}
+
+# Only deletes if the global variable directory exists.
+function delete_tmp_dir() {
+    if [ ! -z $OOM_TMP_DIR -a -d $OOM_TMP_DIR ]
+    then
+        rm -r $OOM_TMP_DIR
+        if [ $? -eq 0 ]
+        then
+            logline "The temporary “$OOM_TMP_DIR” has been deleted." 1
+        else
+            logline "The temporary directory at “$OOM_TMP_DIR” could not be deleted." 3
+        fi
+    fi
+}
+    
+function throw() {
+    MSG=${1:-"Unexpected error. Your configuration may be now in a dangling state."}
+    ERR=${2:-1}
+    logline "$MSG" 3
+    delete_tmp_dir
+    exit $ERR
+}
+
+
+function help() {
+echo '
+TODO
+    - Explain all the usages
+    - Explain the directory structure
+    - Talk about the server and client directories that are already there.
+    - Talk about the magic of systemd that makes a “service” for each server or client.
+'
+}
+
+
+function init() {
+    # TODO: confirm continue if the directory openvpn exits, or make a backup or something
+
+    # TODO: remove the mkdir and just check if a writtable directory exists
+    mkdir -p $OOM_OVPN_DIR || throw
+    pushd $OOM_OVPN_DIR || throw
+    
+    # ”client” and “server” directories are expected to exist (at least in the Debian 10 systemd way™), we recreate them in case they are missing.
+    mkdir client || throw
+    mkdir server || throw
+    mv server servers-available || throw
+    mkdir servers-enabled || throw
+    ln -s servers-enabled server || throw
+    
+    #pushd $OOM_OVPN_DIR
+    popd
+    
+    # We create an Easy-RSA instance for OpenVPN usage.
+    make-cadir $OOM_ERSA_DIR || throw
+    
+    # We create a wrapper around Easy-RSA (basically to change the permissions after each invocation).
+    pushd $OOM_ERSA_DIR || throw
+
+        mv easyrsa easyrsa.real || throw
+        echo '
+#!/bin/sh
+# Wrapper script created by ovpn-o-matic
+# SRC_DIR One line snippet from https://gist.github.com/tvlooy/cbfbdb111a4ebad8b93e
+
+SRC_DIR=$(dirname $(readlink -f "$0")) || exit $?
+EASYRSA_NO_UMASK=1 $SRC_DIR/easyrsa.real $@
+RETURN=$?
+pushd pki
+    chmod -R ugo+rX `ls --ignore=static.key --ignore=private`
+    chmod -R o-wrx static.key private
+popd
+exit $RETURN
+        ' > easyrsa || throw
+        chmod ugo+x easyrsa || throw
+    #pushd $OOM_ERSA_DIR 
+    popd 
+     
+    # Those are the default, built-in templates.
+    mkdir -p $OOM_OVPN_DIR/templates || throw
+    pushd $OOM_OVPN_DIR/templates || throw
+        echo '
+Feel free to add your derived server templates, but take the “default” one as
+an example, because ovpn-o-matic expects to:
+    - Have a “client-config-available” directory (should be empty).
+    - Have a “client-config-enabled” directory (must be empty).
+    - Have a “deliver-templates” directory (see README.txt there).
+    - Not have a “server.conf” file, as it will be generated.
+    - Have a “server.conf.d” with at least one file ending with the extension
+      “.conf”. Each file will be explicitly included by the outer “server.conf”
+      file. For this reason, if you add or remove configuration files you must 
+      re-run “ovpn-o-matic server-confupdate …server name…”.
+        ' > README.txt || throw
+        mkdir default || throw
+        pushd default || throw
+            mkdir client-config-available || throw
+            mkdir client-config-enabled || throw
+            mkdir pki || throw
+            pushd pki || throw
+                echo '
+# ALGO can be set to “rsa” or “ec”
+set_var EASYRSA_ALGO           rsa
+set_var EASYRSA_DIGEST         sha256
+set_var EASYRSA_KEY_SIZE       4096
+
+# This “anti-NSA” curve requires TLS 1.3
+set_var EASYRSA_CURVE          ed25519
+
+set_var EASYRSA_CA_EXPIRE      171001
+set_var EASYRSA_CERT_EXPIRE    171001
+set_var EASYRSA_CRL_DAYS       171001
+set_var EASYRSA_CERT_RENEW     7
+
+# Unofficial variable; potentially dangerous when set to yes.
+# Used to allow a degraded openvpn instance to read non private data inside PKI.
+# Seems that the important secret data is generated with the right permissions. (only readable by root).
+set_var EASYRSA_NO_UMASK       "yes"
+                ' > vars || throw
+            #pushd pki
+            popd
+            mkdir server.conf.d || throw
+            pushd server.conf.d
+                echo '
+server 192.168.230.0 255.255.255.0 nopool
+topology subnet
+ifconfig-pool 192.168.230.129 192.168.230.255 255.255.255.0
+client-to-client
+
+
+proto tcp-server
+port 1194
+tcp-nodelay
+;multihome
+port-share 192.187.20.203 80
+
+
+dev-type tun
+dev tun0
+
+# Does ping, ping-reset and pushes them to the client.
+keepalive 10 60
+
+push-peer-info
+opt-verify
+
+# NOTE
+# syslog, log, log-append, status, status-version
+
+# NOTE (check what happens with the ccd)
+# ifconfig-push
+
+# NOTE ccd file options
+# disable, 
+
+                ' > main.conf || throw
+                echo '
+remote-cert-tls client
+
+dh pki/dh.pem
+crl-verify pki/crl.pem
+
+# Add a layer of symetric encrtyption before TLS. Is a mitigation for a post-quantic cryptography era.
+tls-crypt pki/static.key
+
+# TLS setup (method 1) (enable only one method)
+ca pki/ca.crt
+cert pki/issued/server.crt
+key pki/private/server.key
+
+# TLS setup (method 2) (enable only one method)
+;pkcs12 pki/server.p12
+;askpass \"path to file where the PKCS#12 key is stored, if not provided the password will be asked by openvpn\"
+
+
+# Advanced cryptography options.
+# ==============================
+cipher AES-256-GCM
+ncp-ciphers AES-256-GCM:AES-256-CBC
+auth SHA256
+
+# TLS 1.3 (method 1) (enable only one method)
+# Note: OpenVPN for Windows is not compatible with TLS 1.3
+;tls-version-min 1.3 or-highest
+;tls-cipher TLS_CHACHA20_POLY1305_SHA256
+;tls-ciphersuites TLS_CHACHA20_POLY1305_SHA256
+;tls-cert-profile suiteb
+;ecdh-curve ED25519
+
+# TLS 1.3 downgradable to TLS 1.2 (method 2) (enable only one method)
+tls-version-min 1.2 or-highest
+tls-cipher TLS-DHE-RSA-WITH-AES-256-GCM-SHA384
+tls-ciphersuites TLS_CHACHA20_POLY1305_SHA256:TLS-DHE-RSA-WITH-AES-256-GCM-SHA384
+tls-cert-profile preferred
+                ' > crypto.conf || throw
+                echo '
+# Interesting options: route, route-gateway, route-metric, 
+
+
+                ' > push-to-client.conf || throw
+                echo '
+# Do not allow OpenVPN to swap memory.
+mlock
+
+# Root downgrade
+persist-key
+persist-tun
+user nobody
+group nogroup
+
+script-security 1
+# Finally, better disable compression (see compression.conf)
+
+                ' > hardening.conf || throw
+                echo '
+compress
+comp-noadapt
+                ' > compression.conf || throw
+                echo '
+client-config-dir client-config-enabled
+
+# Clients cannot connect unless they have an “enabled configuration”.
+ccd-exclusive
+                ' > ccd.conf || throw
+                echo '
+mute-replay-warnings
+verb 3
+                ' > log.conf || throw
+            #pushd server.conf.d
+            popd
+            mkdir deliver-templates || throw
+            pushd deliver-templates || throw
+                echo '
+Feel free to add your derived client templates, but take the “default” one as
+an example, because ovpn-o-matic will (on a temporary place) overwrite, and
+thus generate the following files if they are present in your template:
+    - static.key
+    - crl.pem
+    - ca.crt
+    - client.key
+    - client.crt
+    - client.p12
+    - client.p7b
+Finally, once all of this is done will make a .tar with all the folder
+contents. The resulting .tar can be distributed to the remote computers.
+Note that any softlinks in the template will be converted to regular files.
+                ' > README.txt || throw
+                mkdir default || throw
+                pushd default || throw
+                    echo '
+client
+proto tcp-client
+
+port 1194
+remote 192.168.56.2
+
+dev-type tun
+dev tun0
+
+push-peer-info
+
+# Connection
+# ==========
+float
+
+# Routing
+# =======
+
+# Bar the server from setting routes
+;route-nopull
+
+# Route everything through the tunnel.
+;redirect-gateway  def1 
+
+# Route all non-public networks through the tunnel.
+;redirect-private def1
+
+# Logging
+# =======
+mute-replay-warnings
+verb 3
+
+# Compression
+# ===========
+
+compress
+comp-noadapt
+
+# Crpytography
+# ============
+remote-cert-tls server
+
+crl-verify crl.pem
+pkcs12 client.p12
+
+tls-crypt static.key
+
+cipher AES-256-GCM
+ncp-ciphers AES-256-GCM:AES-256-CBC
+auth SHA256
+tls-cert-profile preferred
+
+tls-version-min 1.2 or-highest
+tls-cipher TLS-DHE-RSA-WITH-AES-256-GCM-SHA384
+tls-ciphersuites TLS_CHACHA20_POLY1305_SHA256:TLS-DHE-RSA-WITH-AES-256-GCM-SHA384
+
+# Hardening
+# ===========
+mlock
+persist-key
+persist-tun
+user nobody
+group nogroup
+
+script-security 1
+
+                    ' > client.ovpn || throw
+                    ln -s client.ovpn client.conf || throw
+                    touch static.key || throw
+                    touch client.p12 || throw
+                    touch crl.pem || throw
+                #pushd default
+                popd
+                mkdir default-unencrypted || throw
+                pushd default-unencrypted || throw
+                    echo '
+
+                    ' > client.ovpn || throw
+                    ln -s client.ovpn client.conf || throw
+                    touch static.key || throw
+                    touch client.p7b || throw
+                    touch client.key || throw
+                    touch client.crt || throw
+                    touch ca.crt || throw
+                    touch crl.pem || throw
+                #pushd default
+                popd
+            #pushd deliver-templates
+            popd
+        #pushd default
+        popd
+    #pushd $OOM_OVPN_DIR/templates
+    popd
+    
+    logline "ovpn-o-matic directory structure has been initialized at “$OOM_OVPN_DIR”." 1
+    logline "Create a new server with “ovpn-o-matic server-add”." 4
+    
+}
+
+function server-confupdate() {
+    OOM_SRV=${1:-srv-`uuid -v4 | cut -f 2 -d -`}
+    OOM_SRV_DIR=$OOM_OVPN_DIR/servers-available/$OOM_SRV
+    [ -z $OOM_SRV ] && throw "Undefined server name."
+    [ ! -e $OOM_SRV_DIR ] && throw "Server found."
+    pushd $OOM_SRV_DIR || throw
+        [ ! -e $OOM_SRV_DIR/server.conf.d ] && throw "“server.conf.d” directory not found."
+        echo "
+# DO NOT EDIT THIS FILE
+# Place .conf files inside server.conf.d (subdirectories are supported) and run:
+#    ovpn-o-matic server-confupdate $OOM_SRV
+cd \"$(pwd)\"
+        " > server.conf || throw
+        for OOM_INCLUDEFILE in $(find server.conf.d -type f -name "*.conf" ); do
+            echo "config \"$OOM_INCLUDEFILE\"" >> server.conf || throw
+        done
+        
+    popd
+}
+
+
+#TODO TEST: With no parameters
+#TODO TEST: With one parameter
+#TODO TEST: With two parameters
+function server-add() {
+    OOM_SRV=$1
+    OOM_TPL=${2:-default}
+    OOM_SRV_DIR=$OOM_OVPN_DIR/servers-available/$OOM_SRV
+    OOM_SRV_LNK=$OOM_OVPN_DIR/servers-enabled/$OOM_SRV.conf
+
+    #TODO TEST: Arrive here when the directory already exists. Expect exit.
+    #TODO TEST: Arrive here when a filename already exists. Expect exit.
+    [ -z $OOM_SRV ] && throw "Undefined server name."
+    [ -e $OOM_SRV_DIR ] && throw "A server with the same name already exists at “$OOM_SRV_DIR”."
+    [ -e $OOM_SRV_LNK ] && throw "A server with the same name already exists at “$OOM_SRV_LNK”."
+    
+    #TODO TEST: Arrive here when the template does not exist. Expect exit.
+    [ ! -d $OOM_OVPN_DIR/templates/$OOM_TPL ] && throw "Template not found. Expected at “$OOM_OVPN_DIR/templates/$OOM_TPL”."
+    
+    # FIRST ALTERATION HERE
+    # =====================
+    
+    mkdir -p $OOM_SRV_DIR || throw
+
+    pushd $OOM_SRV_DIR || throw
+        #TODO TEST: Make pki break. Expect exit.
+        $OOM_ERSA_CMD --batch init-pki || throw "Easy-RSA PKI initialization failed. Your configuration may be now in a dangling state."
+
+        #TODO TEST: Use a template that does not exist. Expect exit.
+        cp -ri $OOM_OVPN_DIR/templates/$OOM_TPL/* ./ || throw
+        
+        $OOM_ERSA_CMD --batch build-ca nopass --batch || throw
+        $OOM_ERSA_CMD --batch build-server-full server nopass || throw
+        $OOM_ERSA_CMD --batch gen-crl || throw
+        $OOM_ERSA_CMD gen-dh || throw
+# SECURITY WARNING put here to speed up executions during the development, disable before commiting
+#echo '-----BEGIN DH PARAMETERS-----
+#MIICCAKCAgEA/a8d5M3MRHhoz2jQFgOWSTwNh3vPcSEBW4QlNJoixIPQbEEY1Yp2
+#orckvI0VgNSmBzVGl9g7kN/lF3UrxIb0fzt+AtzlRlgBt0u3DVSloxDhDy2CwsFk
+#xuuSNzrzaGnLaHAnkfCMZYyU2xglv7AZ6ncQOBSnd/eDXPf1lRmU48RhiMmM8v2f
+#DD20mnytmENrEnx7E4AvIjbkUn97fQ3eLA1wSD/tGmPc5PP9mm3l/A7hrWkqhSul
+#yXbQQ++7wloA3GgQfb3qKO8luoSCLqZ0MtMEPPjsk8rquDSWdXi5/Imo5MN2Ffqs
+#iFQ3RDyk2hp/JeaSN4ENJXPP+AxWpza6rMz8B/Ya8ujvKPkPZPUOzA/OKZOe4W9O
+#/753SLrsZJr0VKry57XtZTFRUfk2F5asXoKfBiLBpuZvL0LWGGMQGV/KV1hBiSbz
+#WnoGxuPUdXzD74K+V+8UXA2D0sk53ySf5vcRJOM93DU5+dlhykgjykTb+6HjbCjI
+#MZ8dVYl7f7PXrr7WD1HogwCUF4cl73BR34eVFS7zG23nBd8ooghlHF/rQEv2DC7x
+#KsZ7fvoVIzN/B2u/0QwODTolrK1gXw4f9fLQPFdWh8yBW7vMeWkWLx0hPFpbIehP
+#hwpUsIjxOzs5T1oNjAX+oE8ibFocvHRuv8IT8nFR1s0sa4SgLya9LysCAQI=
+#-----END DH PARAMETERS-----' > pki/dh.pem
+
+        $OOM_OVPN_CMD --genkey --secret pki/static.key || throw
+    
+        server-confupdate $OOM_SRV || throw
+    #pushd $OOM_SRV_DIR
+    popd
+    
+    
+    logline "New server instance “$OOM_SRV” created." 1
+    logline "Enable it using “ovpn-o-matic server-enable $OOM_SRV”." 4
+}
+
+
+#TODO TEST: Pasar un servidor buit. Cal millorar les condicions
+function server-enable() {
+    OOM_SRV=$1
+    [ -z $OOM_SRV ] && throw "Undefined server name."
+    pushd $OOM_OVPN_DIR/servers-enabled || throw
+        ln -s ../servers-available/$OOM_SRV/server.conf $OOM_SRV.conf || throw "The server named “$OOM_SRV” could not be enabled."
+    popd
+    logline "Server instance “$OOM_SRV” enabled." 1
+    logline "Start it using “systemctl start openvpn-server@$OOM_SRV”." 4
+}
+#TODO TEST: Pasar un servidor buit.
+function server-disable() {
+    OOM_SRV=$1
+    [ -z $OOM_SRV ] && throw "Undefined server name."
+    rm $OOM_OVPN_DIR/servers-enabled/$OOM_SRV.conf || throw "The server named “$OOM_SRV” could not be disabled (is it already disabled?)."
+    logline "Server instance “$OOM_SRV” disabled." 1
+}
+
+# Not meant to be directly called, done in this way to avoid spaghetti coding the checks at the beginning.
+function client-something() {
+    ACTION=$1
+    OOM_SRV=$2
+    OOM_CLI=$3
+    #OOM_TPL (declared inside pack)
+    OOM_SRV_DIR=$OOM_OVPN_DIR/servers-available/$OOM_SRV
+    [ -z $OOM_SRV ] && throw "Undefined server name."
+    [ ! -d $OOM_SRV_DIR ] && throw "Server “$OOM_SRV” not found. Expected at “$OOM_SRV_DIR”"
+    [ -z $OOM_CLI ] && throw "Undefined client name."
+
+    if [ $ACTION = "config-enable" ]
+    then
+        if [ ! -e $OOM_SRV_DIR/client-config-enabled/$OOM_CLI ]
+        then
+            [ ! -e $OOM_SRV_DIR/client-config-available/$OOM_CLI ] && throw "client configuration for “$OOM_CLI” not found. Expected at “…/client-config-available/$OOM_CLI”"
+            # FIRST ALTERATION HERE
+            pushd $OOM_SRV_DIR/client-config-enabled/ || throw
+                ln -s ../client-config-available/$OOM_CLI $OOM_CLI || throw
+            popd
+            logline "Client configuration for “$OOM_CLI” enabled in the “$OOM_CLI” server." 1
+        else
+            logline "Client configuration for “$OOM_CLI” already enabled." 4
+        fi
+    fi
+    
+    if [ $ACTION = "config-disable" ]
+    then
+        if [ -h $OOM_SRV_DIR/client-config-enabled/$OOM_CLI -o -e $OOM_SRV_DIR/client-config-enabled/$OOM_CLI ]
+        then
+            # FIRST ALTERATION HERE
+            rm $OOM_SRV_DIR/client-config-enabled/$OOM_CLI || throw
+            logline "Client configuration for “$OOM_CLI” disabled in the “$OOM_CLI” server." 1
+        else
+            logline "Client configuration for “$OOM_CLI” already disabled." 4
+        fi
+    fi
+    
+    if [ $ACTION = "pack" ]
+    then
+        pushd $OOM_SRV_DIR || throw
+            # TODO allow the user to choose if a pasword is desired.
+            # TODO si el fitxer de desti existeix … ABORT
+            OOM_TPL=${4:-default}
+            [ -z $OOM_TPL ] && throw "Undefined template name."
+            [ ! -e deliver-templates/$OOM_TPL ] && throw "Template not found. Expected at “$OOM_SRV_DIR/deliver-templates/$OOM_TPL”."
+            
+            # TODO comprovar is falla be el throw si lo de entre accents peta
+            OOM_TMP_DIR="`mktemp --tmpdir -d ovpn-o-matic.XXX`" || throw
+            logline "Temporary directory “$OOM_TMP_DIR” created." 1
+        
+            cp -dr deliver-templates/$OOM_TPL/* $OOM_TMP_DIR || throw
+            if [ -e $OOM_TMP_DIR/static.key ]
+            then
+                [ ! -e pki/static.key ] && throw "Static key not found. Expected at “$OOM_SRV_DIR/pki/static.key”."
+                cp -d pki/static.key $OOM_TMP_DIR/static.key || throw
+                chmod 600 $OOM_TMP_DIR/static.key || throw
+                logline "The resulting tarball will contain a file named “static.key” that contains an unencrypted key." 2
+            fi
+            
+            if [ -e $OOM_TMP_DIR/crl.pem ]
+            then
+                [ ! -e pki/crl.pem ] && throw "CRL not found. Expected at “$OOM_SRV_DIR/pki/crl.pem”."
+                cp -d pki/crl.pem $OOM_TMP_DIR/crl.pem || throw
+                logline "A “crl.pem” file has been included. Please, be aware of the associated risks when a client uses an expired CRL." 4
+            fi
+            
+            if [ -e $OOM_TMP_DIR/ca.crt ]
+            then
+                [ ! -e pki/ca.crt ] && throw "CA not found. Expected at “$OOM_SRV_DIR/pki/ca.crt”."
+                cp -d pki/ca.crt $OOM_TMP_DIR/ca.crt || throw
+            fi
+            
+            if [ -e $OOM_TMP_DIR/client.crt ]
+            then
+                [ ! -e pki/issued/$OOM_CLI.crt ] && throw "Client certificate not found. Expected at “$OOM_SRV_DIR/pki/issued/$OOM_CLI.crt”."
+                cp -d pki/issued/$OOM_CLI.crt $OOM_TMP_DIR/client.crt || throw
+            fi
+            
+            
+            if [ -e $OOM_TMP_DIR/client.key ]
+            then
+                [ ! -e pki/private/$OOM_CLI.key ] && throw "Client private key file not found. Expected at “$OOM_SRV_DIR/pki/private/$OOM_CLI.key”."
+                cp -d pki/private/$OOM_CLI.key $OOM_TMP_DIR/client.key || throw
+                chmod 600 $OOM_TMP_DIR/client.key || throw
+                logline "The resulting tarball will contain a file named “client.key” that contains an unencrypted private key." 2
+            fi
+            
+            if [ -e $OOM_TMP_DIR/client.p7b ]
+            then
+                $OOM_ERSA_CMD --batch export-p7 $OOM_CLI || throw
+                [ ! -e pki/issued/$OOM_CLI.p7b ] && throw "Client PKCS#7 file not found. Expected at “$OOM_SRV_DIR/pki/issued/$OOM_CLI.p7b”."
+                cp -d pki/issued/$OOM_CLI.crt $OOM_TMP_DIR/client.p7b || throw
+            fi
+            
+            if [ -e $OOM_TMP_DIR/client.p12 ]
+            then
+                logline "It is strongly recomended to password-protect your private key." 4
+                $OOM_ERSA_CMD --batch export-p12 $OOM_CLI || throw
+                [ ! -e pki/private/$OOM_CLI.p12 ] && throw "Client PKCS#12 file not foud. Expected at “$OOM_SRV_DIR/pki/private/$OOM_CLI.p12”."
+                cp -d pki/private/$OOM_CLI.p12 $OOM_TMP_DIR/client.p12 || throw 
+                chmod 600 $OOM_TMP_DIR/client.p12 || throw 
+                logline "The resulting tarball will contain a file named “client.p12” that contains an encrypted private key." 2
+            fi
+            
+        #pushd $OOM_SRV_DIR
+        popd
+        
+        OOM_DESTINATION=$PWD
+        pushd $OOM_TMP_DIR
+            tar --create --file $OOM_DESTINATION/$OOM_SRV.$OOM_CLI.$OOM_TPL.tar * || throw "Unexpected error when creating the tarball."
+            # Yes, it is in this silly way to avoid having a top directory on the tarball.
+        popd
+        delete_tmp_dir
+    fi
+    
+    if [ $ACTION = "remove" ]
+    then
+        # FIRST ALTERATION HERE
+        client-something "config-disable" $OOM_SRV $OOM_CLI || throw
+        if [ -e $OOM_SRV_DIR/client-config-available/$OOM_CLI ]
+        then
+            rm $OOM_SRV_DIR/client-config-available/$OOM_CLI || throw
+            logline "Deleting client configuration for “$OOM_CLI” in the “$OOM_CLI” server." 1
+        else
+            logline "No client configuration deleted for “$OOM_CLI” in the “$OOM_CLI” server." 4
+        fi
+        
+        if [ -e $OOM_SRV_DIR/pki/issued/$OOM_CLI.crt ]
+        then
+            pushd $OOM_SRV_DIR || throw
+                $OOM_ERSA_CMD --batch revoke $OOM_CLI || throw
+                logline "Revoking the client certificate for “$OOM_CLI” in the “$OOM_CLI” server." 1
+                $OOM_ERSA_CMD --batch gen-crl || throw
+                logline "Regenerating certificate revocation list (CRL) for the “$OOM_CLI” server." 1
+            popd
+        else
+            logline "No client certificate to revoke could be found for “$OOM_CLI” in the “$OOM_CLI” server." 2
+        fi
+        
+        logline "Client configuration for “$OOM_CLI” disabled in the “$OOM_CLI” server." 1
+    fi
+    
+    if [ $ACTION = "add" ]
+    then
+        pushd $OOM_SRV_DIR  || throw
+            [ -e client-config-available/$OOM_CLI ] && throw "A client with the same name already exists at “…/client-config-available/$OOM_CLI”."
+            [ -h client-config-enabled/$OOM_CLI -o -e client-config-enabled/$OOM_CLI ] && throw "A client with the same name already exists at “…/client-config-enabled/$OOM_CLI”."
+            [ -e $OOM_SRV_DIR/pki/issued/$OOM_CLI.crt ] && throw "A non-revoked client certificate with the same “common-name“ (CN) already exists in the PKI."
+            
+            # FIRST ALTERATION HERE
+            $OOM_ERSA_CMD --batch build-client-full $OOM_CLI nopass || throw
+            touch client-config-available/$OOM_CLI || throw
+        popd
+        
+        logline "New client instance “$OOM_CLI” created at “$OOM_SRV” server." 1
+        logline "Enable its configuration using “ovpn-o-matic client-config-enable $OOM_SRV $OOM_CLI”." 4
+        logline "Pack the configuration files for the remote client using “ovpn-o-matic client-pack $OOM_SRV $OOM_CLI”." 4
+    
+    fi
+}
+
+
+
+function client-config-enable() {
+    client-something "config-enable" $@
+}
+
+function client-config-disable() {
+    client-something "config-disable" $@
+}
+
+function client-add() {
+    client-something "add" $@
+}
+
+function client-remove() {
+    client-something "remove" $@
+}
+
+function client-pack() {
+    client-something "pack" $@
+}
+
+function main() {
+    OOM_CMD=$1
+    shift
+    case $OOM_CMD in
+        "init")
+            init $@
+        ;;
+        "server-add")
+            server-add $@
+        ;;
+        "server-remove")
+            throw "TODO implement server-remove"
+        ;;
+        "server-enable")
+            server-enable $@
+        ;;
+        "server-disable")
+            server-disable $@
+        ;;
+        "server-confupdate")
+            server-confupdate $@
+        ;;
+        "client-config-enable")
+            client-something "config-enable" $@
+        ;;
+        "client-config-disable")
+            client-something "config-disable" $@
+        ;;
+        "client-add")
+            client-something "add" $@
+        ;;
+        "client-remove")
+            client-something "remove" $@
+        ;;
+        "client-pack")
+            client-something "pack" $@
+        ;;
+        "help")
+            help $@
+        ;;
+        *)
+            logline 4 "For more information run “ovpn-o-matic help”"
+            throw "Command not found"
+        ;;
+    esac
+}
+
+main $@
+
+
