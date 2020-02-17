@@ -38,6 +38,10 @@ TODO; meanwhile look ovpn-o-matic_examplerun.sh
 - [ ] Do the help and a better about.
 - [ ] Add some testing with BATS.
 - [ ] Add a “development” flag to avoid regenerating dh parameters on every run
+- [ ] easyrsa directory has 600 permissions, better 655.
+- [ ] Do something (or at least provide a way) to manage the forwarding and the firewall status.
+- [x] Care about SystemD compatibility (specially those limits in the .service file of openvpn installation in some distributions)
+- [x] Care about Network-Manager compatibility (make the import of VPN configuration files easy).
 
 # Contributing
 

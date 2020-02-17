@@ -1,15 +1,39 @@
 #!/bin/bash
-
+#
+# License
+# =======
+# ovpn-o-matic
+# Copyright (C) 2020 Laboratori de Gràfics i Imatge, Universitat de Girona
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/> or the
+# LICENSE file in this repository.
+ #
 # System dependencies
 # ===================
 # *Debian*
 # apt-get install openvpn easy-rsa
 
+# Variables, which can be overrided via environment variables
 OOM_OVPN_DIR="/etc/openvpn"
 OOM_OVPN_CMD="openvpn"
+
+# Other global variables…
 OOM_ERSA_DIR="$OOM_OVPN_DIR/easyrsa"
 OOM_ERSA_CMD="$OOM_ERSA_DIR/easyrsa"
 OOM_TPLS_DIR="$OOM_OVPN_DIR/templates"
+
+# If not empty, the directory referenced here will be deleted on exit or program failure.
 OOM_TMP_DIR=""
 
 
@@ -242,22 +266,26 @@ tls-cert-profile preferred
 
                 ' > push-to-client.conf || throw
                 echo '
+# Better disable compression (see compression.conf)
 # Do not allow OpenVPN to swap memory.
 mlock
 
 # Root downgrade
 persist-key
 persist-tun
-user nobody
-group nogroup
+
+# [!] User and group options may interfere with SystemD (at least it happens on Debian 10)
+;user nobody
+;group nogroup
 
 script-security 1
-# Finally, better disable compression (see compression.conf)
 
                 ' > hardening.conf || throw
                 echo '
 compress
 comp-noadapt
+comp-lzo no
+push "comp-lzo no"
                 ' > compression.conf || throw
                 echo '
 client-config-dir client-config-enabled
@@ -328,6 +356,7 @@ verb 3
 
 compress
 comp-noadapt
+comp-lzo no
 
 # Crpytography
 # ============
@@ -352,8 +381,10 @@ tls-ciphersuites TLS_CHACHA20_POLY1305_SHA256:TLS-DHE-RSA-WITH-AES-256-GCM-SHA38
 mlock
 persist-key
 persist-tun
-user nobody
-group nogroup
+
+# [!] User and group options may interfere with SystemD (at least it happens on Debian 10)
+;user nobody
+;group nogroup
 
 script-security 1
 
