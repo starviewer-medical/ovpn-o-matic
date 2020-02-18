@@ -195,11 +195,14 @@ ifconfig-pool 192.168.230.129 192.168.230.255 255.255.255.0
 client-to-client
 
 
-proto tcp-server
+proto udp
 port 1194
 tcp-nodelay
 ;multihome
-port-share 192.187.20.203 80
+
+# Can only be used with “proto tcp-server”.
+# The example IP 192.187.20.203 corresponds to one of the Spanish censorship redirection servers.
+;port-share 192.187.20.203 80
 
 
 dev-type tun
@@ -320,10 +323,10 @@ Note that any softlinks in the template will be converted to regular files.
                 pushd default || throw
                     echo '
 client
-proto tcp-client
+proto udp
 
 port 1194
-remote 192.168.56.2
+remote 127.0.0.1
 
 dev-type tun
 dev tun0
